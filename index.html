@@ -2,20 +2,35 @@
 <html>
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Octo Dash</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body {
+  *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%;
     background:#020b18;
-    display:flex; align-items:center; justify-content:center;
-    height:100vh; overflow:hidden;
+    overflow:hidden;
+    overscroll-behavior:none;
+    -webkit-overflow-scrolling:none;
+    touch-action:none;
+    user-select:none;
+    -webkit-user-select:none;
+    -webkit-tap-highlight-color:transparent;
     font-family:'Press Start 2P', monospace;
   }
-  #gameCanvas {
-    display:block; image-rendering:pixelated;
-    border:3px solid #1a6b8a;
-    box-shadow:0 0 40px rgba(0,180,255,0.2), 0 0 80px rgba(0,100,200,0.1);
+  canvas {
+    display:block;
+    position:fixed;
+    top:0; left:0;
+    width:100dvw;
+    height:100dvh;
+    image-rendering:pixelated;
+    image-rendering:crisp-edges;
+    touch-action:none;
   }
 </style>
 </head>
@@ -23,19 +38,51 @@
 <canvas id="gameCanvas"></canvas>
 <script>
 const canvas = document.getElementById('gameCanvas');
-const ctx = canvas.getContext('2d');
-const BASE_W = 400, BASE_H = 550;
-canvas.width = BASE_W; canvas.height = BASE_H;
+const ctx    = canvas.getContext('2d');
 
-const FLOOR_Y = BASE_H - 28;
-const OCTO_R = 16, OCTO_X = 72;
-const GRAVITY = 0.10, DRAG = 0.97, FLAP = -4.2;
-const PIPE_W = 56, GAP = 210, PIPE_SPEED = 2.2, PIPE_INTERVAL = 130;
+// ── Design dimensions (all game logic lives in this space) ──────────────
+const DW = 400, DH = 550;
 
-// ── Octopus pixel art (body + static pixel tentacles) ──────────────────
-const OC = { NONE:0, BODY:1, EYE:2, PUPIL:3, DARK:4, LIGHT:5, TENT:6, SUCKER:7 };
+// Runtime scale — recomputed on every resize so canvas fills screen exactly
+let SX = 1, SY = 1;
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  // Use visualViewport when available (handles iOS Safari bottom bar)
+  const vv  = window.visualViewport;
+  const W   = vv ? vv.width  : window.innerWidth;
+  const H   = vv ? vv.height : window.innerHeight;
+  canvas.width  = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  SX = canvas.width  / DW;
+  SY = canvas.height / DH;
+}
+
+// Resize immediately and on every orientation / viewport change
+resize();
+window.addEventListener('resize', resize);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', resize);
+  window.visualViewport.addEventListener('scroll', resize);
+}
+
+// ── Game constants (in design-space) ───────────────────────────────────
+const FLOOR_Y       = DH - 28;
+const OCTO_R        = 16;
+const OCTO_X        = 72;
+const GRAVITY       = 0.10;
+const DRAG          = 0.97;
+const FLAP          = -4.2;
+const PIPE_W        = 56;
+const GAP           = 210;
+const PIPE_SPEED    = 2.2;
+const PIPE_INTERVAL = 130;
+
+// ── Octopus art ─────────────────────────────────────────────────────────
+const OC = { NONE:0, BODY:1, EYE:2, PUPIL:3, DARK:4, LIGHT:5 };
 const OCTOPUS_PIXELS = [
-  // Head & body (rows 0-13)
   [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
   [0,0,0,0,0,1,1,1,1,1,1,0,0,0,0,0],
   [0,0,0,1,1,1,1,1,1,1,1,1,1,0,0,0],
@@ -45,53 +92,43 @@ const OCTOPUS_PIXELS = [
   [0,1,1,1,2,2,1,5,5,1,2,2,1,1,1,0],
   [0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0],
   [0,0,0,1,1,1,4,1,1,4,1,1,1,0,0,0],
-  [0,0,6,6,1,1,4,1,1,4,1,1,6,6,0,0],
-  [0,6,6,7,6,6,1,1,1,1,6,6,7,6,6,0],
-  [6,6,7,6,7,6,6,0,0,6,6,7,6,7,6,6],
-  [6,7,6,7,6,0,0,0,0,0,0,6,7,6,7,6],
-  [6,0,6,0,0,0,0,0,0,0,0,0,0,6,0,6],
-  // Pixel tentacles (rows 14-21) — two pairs curling inward
-  [6,0,6,0,0,0,0,0,0,0,0,0,0,6,0,6],
-  [6,0,0,6,0,0,0,0,0,0,0,0,6,0,0,6],
-  [6,0,0,0,6,0,0,0,0,0,0,6,0,0,0,6],
-  [0,6,0,0,6,0,0,0,0,0,0,6,0,0,6,0],
-  [0,6,0,0,0,6,0,0,0,0,6,0,0,0,6,0],
-  [0,0,6,0,0,6,0,0,0,0,6,0,0,6,0,0],
-  [0,0,6,0,0,0,7,0,0,7,0,0,0,6,0,0],
-  [0,0,0,7,0,0,0,0,0,0,0,0,7,0,0,0],
+  [0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,0],
 ];
 const OCTOPUS_COLORS = {
-  [OC.BODY]:  '#c966cc', [OC.EYE]:   '#f5f5ff',
-  [OC.PUPIL]: '#1a0033', [OC.DARK]:  '#9933aa',
-  [OC.LIGHT]: '#e8aaff', [OC.TENT]:  '#b855c4',
-  [OC.SUCKER]:'#f0d0f5',
+  [OC.BODY]:'#c966cc',[OC.EYE]:'#f5f5ff',
+  [OC.PUPIL]:'#1a0033',[OC.DARK]:'#9933aa',[OC.LIGHT]:'#e8aaff',
 };
-const OCTO_S = 3;           // pixel scale
-const BODY_CENTER_ROW = 7;  // sprite row used as the physics centre
+const OCTO_S         = 3;
+const BODY_ROWS      = OCTOPUS_PIXELS.length;
+const BODY_CENTER_ROW = 7;
+const TENT_COLS      = [1,3,5,7,9,11,13,15];
+const TENT_LEN       = 3;
+const TENT_BODY      = '#b855c4';
+const TENT_MID       = '#c966cc';
+const TENT_TIP       = '#f0d0f5';
 
-// ── Static reef layout (positions never change → no flicker) ────────────
+// ── Static reef ─────────────────────────────────────────────────────────
 const REEF_SEAWEED = [
-  {x:12,h:13,ph:0.0}, {x:20,h:8, ph:1.5}, {x:58, h:17,ph:0.7},
-  {x:142,h:11,ph:2.0},{x:190,h:19,ph:0.4},{x:260,h:9, ph:1.8},
-  {x:314,h:15,ph:0.2},{x:360,h:12,ph:2.3},{x:392,h:7, ph:1.1},
+  {x:12,h:13,ph:0.0},{x:20,h:8,ph:1.5},{x:58,h:17,ph:0.7},
+  {x:142,h:11,ph:2.0},{x:190,h:19,ph:0.4},{x:260,h:9,ph:1.8},
+  {x:314,h:15,ph:0.2},{x:360,h:12,ph:2.3},{x:392,h:7,ph:1.1},
 ];
 const REEF_CORALS = [
-  {x:35, h:11,w:6},{x:108,h:17,w:8},{x:200,h:14,w:7},
+  {x:35,h:11,w:6},{x:108,h:17,w:8},{x:200,h:14,w:7},
   {x:292,h:19,w:9},{x:365,h:12,w:6},
 ];
 const REEF_ROCKS = [
-  {x:63, w:24,h:10},{x:160,w:18,h:7},{x:245,w:28,h:11},{x:330,w:21,h:8},
+  {x:63,w:24,h:10},{x:160,w:18,h:7},{x:245,w:28,h:11},{x:330,w:21,h:8},
 ];
-// Small seafloor details: starfish / pebbles
 const REEF_DETAILS = [
-  {x:45, y:FLOOR_Y-4, type:'star', color:'#4a1a00'},
-  {x:130,y:FLOOR_Y-4, type:'pebble',color:'#0c1b2a'},
-  {x:230,y:FLOOR_Y-4, type:'star', color:'#3a1200'},
-  {x:300,y:FLOOR_Y-4, type:'pebble',color:'#0e1d2e'},
-  {x:380,y:FLOOR_Y-4, type:'star', color:'#3a1a00'},
+  {x:45,y:FLOOR_Y-4,type:'star',  color:'#4a1a00'},
+  {x:130,y:FLOOR_Y-4,type:'pebble',color:'#0c1b2a'},
+  {x:230,y:FLOOR_Y-4,type:'star',  color:'#3a1200'},
+  {x:300,y:FLOOR_Y-4,type:'pebble',color:'#0e1d2e'},
+  {x:380,y:FLOOR_Y-4,type:'star',  color:'#3a1a00'},
 ];
 
-// ── State ──────────────────────────────────────────────────────────────
+// ── State ────────────────────────────────────────────────────────────────
 let hiscore = parseInt(localStorage.getItem('octoDashHiScore') || '0', 10);
 let state = 'idle';
 let octoY, octoVY, onFloor, score;
@@ -100,123 +137,105 @@ let pipes, bubbles, particles, floaties, frame;
 function saveHiScore() { localStorage.setItem('octoDashHiScore', hiscore); }
 
 function initGame() {
-  octoY = BASE_H/2; octoVY = 0; onFloor = false; score = 0;
+  octoY = DH/2; octoVY = 0; onFloor = false; score = 0;
   pipes = []; particles = []; frame = 0;
-  bubbles  = Array.from({length:22}, ()=>makeBubble(true));
-  floaties = Array.from({length:5},  ()=>makeFloaty(true));
+  bubbles  = Array.from({length:22}, () => makeBubble(true));
+  floaties = Array.from({length:5},  () => makeFloaty(true));
 }
 function makeBubble(rand) {
-  return { x:rand?Math.random()*BASE_W:BASE_W+5,
-           y:rand?Math.random()*BASE_H:BASE_H+5,
+  return { x:rand?Math.random()*DW:DW+5, y:rand?Math.random()*DH:DH+5,
            r:1+Math.random()*4, speed:0.3+Math.random()*0.7,
            wobble:Math.random()*Math.PI*2, wobbleSpeed:0.02+Math.random()*0.03,
            alpha:0.15+Math.random()*0.4 };
 }
 function makeFloaty(rand) {
-  return { x:rand?Math.random()*BASE_W:-30,
-           y:rand?Math.random()*BASE_H:Math.random()*BASE_H,
+  return { x:rand?Math.random()*DW:-30, y:rand?Math.random()*DH:Math.random()*DH,
            size:3+Math.floor(Math.random()*5), speed:0.2+Math.random()*0.5,
            sway:Math.random()*Math.PI*2, type:Math.floor(Math.random()*3) };
 }
 function addPipe() {
   const minT=60, maxT=FLOOR_Y-GAP-60;
-  pipes.push({x:BASE_W, topH:minT+Math.random()*(maxT-minT), scored:false});
+  pipes.push({x:DW, topH:minT+Math.random()*(maxT-minT), scored:false});
 }
 
-// ── Background ─────────────────────────────────────────────────────────
+// ── Drawing (all coords in design-space; ctx.scale handles the rest) ────
 function drawWaterGradient() {
-  const g = ctx.createLinearGradient(0,0,0,BASE_H);
+  const g = ctx.createLinearGradient(0,0,0,DH);
   g.addColorStop(0,'#01090f'); g.addColorStop(0.35,'#021630');
   g.addColorStop(0.75,'#030e1e'); g.addColorStop(1,'#020b18');
-  ctx.fillStyle=g; ctx.fillRect(0,0,BASE_W,BASE_H);
-  // light rays
+  ctx.fillStyle=g; ctx.fillRect(0,0,DW,DH);
   ctx.save();
   for(let i=0;i<5;i++){
     const x=40+i*80+Math.sin(frame*0.008+i)*12;
-    const rg=ctx.createLinearGradient(x,0,x+20,BASE_H*0.65);
+    const rg=ctx.createLinearGradient(x,0,x+20,DH*0.65);
     rg.addColorStop(0,'rgba(80,180,255,0.045)'); rg.addColorStop(1,'rgba(80,180,255,0)');
     ctx.fillStyle=rg; ctx.beginPath();
     ctx.moveTo(x-10,0); ctx.lineTo(x+30,0);
-    ctx.lineTo(x+45,BASE_H*0.65); ctx.lineTo(x,BASE_H*0.65);
-    ctx.fill();
+    ctx.lineTo(x+45,DH*0.65); ctx.lineTo(x,DH*0.65); ctx.fill();
   }
   ctx.restore();
 }
 
 function drawReef() {
-  const pw = 3;
-
-  // Far background coral silhouettes (dark, muted)
-  REEF_CORALS.forEach(c => {
-    ctx.fillStyle = 'rgba(55,8,8,0.60)';
-    for(let i=0;i<c.h;i++) {
-      const w = Math.max((c.w - Math.floor(i*0.18))*pw, pw*2);
-      ctx.fillRect(c.x, FLOOR_Y-(i+1)*pw, w, pw);
+  const pw=3;
+  REEF_CORALS.forEach(c=>{
+    ctx.fillStyle='rgba(55,8,8,0.60)';
+    for(let i=0;i<c.h;i++){
+      const w=Math.max((c.w-Math.floor(i*0.18))*pw,pw*2);
+      ctx.fillRect(c.x,FLOOR_Y-(i+1)*pw,w,pw);
     }
-    const bh = Math.floor(c.h*0.55);
-    for(let i=0;i<Math.floor(c.h*0.38);i++) {
-      ctx.fillRect(c.x-i*pw,           FLOOR_Y-(bh+i+1)*pw, pw*2, pw);
-      ctx.fillRect(c.x+c.w*pw+i*pw,    FLOOR_Y-(bh+i+1)*pw, pw*2, pw);
+    const bh=Math.floor(c.h*0.55);
+    for(let i=0;i<Math.floor(c.h*0.38);i++){
+      ctx.fillRect(c.x-i*pw,FLOOR_Y-(bh+i+1)*pw,pw*2,pw);
+      ctx.fillRect(c.x+c.w*pw+i*pw,FLOOR_Y-(bh+i+1)*pw,pw*2,pw);
     }
   });
-
-  // Rocks
-  REEF_ROCKS.forEach(r => {
+  REEF_ROCKS.forEach(r=>{
     for(let px=0;px<r.w;px+=pw){
       const dist=Math.abs(px-r.w/2);
-      const rh=Math.max(Math.floor((r.h-dist*0.55)/pw)*pw, 0);
+      const rh=Math.max(Math.floor((r.h-dist*0.55)/pw)*pw,0);
       for(let py=0;py<rh;py+=pw){
-        ctx.fillStyle = py<pw ? '#0d1d30' : '#091420';
-        ctx.fillRect(r.x+px, FLOOR_Y-py-pw, pw, pw);
+        ctx.fillStyle=py<pw?'#0d1d30':'#091420';
+        ctx.fillRect(r.x+px,FLOOR_Y-py-pw,pw,pw);
       }
     }
   });
-
-  // Seaweed (pixel-stepped sway, no Math.random)
-  REEF_SEAWEED.forEach(sw => {
+  REEF_SEAWEED.forEach(sw=>{
     for(let row=0;row<sw.h;row++){
-      const sway = Math.floor(Math.sin(frame*0.025+sw.ph) * Math.min(row*0.28,2.4)) * pw;
-      const col = (row%3===0)?'#185a2a':(row%3===1)?'#0d3c1a':'#1d6830';
+      const sway=Math.floor(Math.sin(frame*0.025+sw.ph)*Math.min(row*0.28,2.4))*pw;
+      const col=(row%3===0)?'#185a2a':(row%3===1)?'#0d3c1a':'#1d6830';
       ctx.fillStyle=col;
-      ctx.fillRect(sw.x+sway, FLOOR_Y-(row+1)*pw, pw*2, pw);
+      ctx.fillRect(sw.x+sway,FLOOR_Y-(row+1)*pw,pw*2,pw);
     }
   });
-
-  // Tiny seafloor details
-  REEF_DETAILS.forEach(d => {
-    ctx.fillStyle = d.color;
+  REEF_DETAILS.forEach(d=>{
+    ctx.fillStyle=d.color;
     if(d.type==='star'){
-      // 5-pixel cross + diagonals = tiny starfish
-      ctx.fillRect(d.x,   d.y-pw, pw, pw);   // top
-      ctx.fillRect(d.x-pw,d.y,    pw, pw);   // left
-      ctx.fillRect(d.x+pw,d.y,    pw, pw);   // right
-      ctx.fillRect(d.x,   d.y,    pw, pw);   // centre
-      ctx.fillRect(d.x,   d.y+pw, pw, pw);   // bottom (partial in sand)
+      ctx.fillRect(d.x,d.y-pw,pw,pw); ctx.fillRect(d.x-pw,d.y,pw,pw);
+      ctx.fillRect(d.x+pw,d.y,pw,pw); ctx.fillRect(d.x,d.y,pw,pw);
+      ctx.fillRect(d.x,d.y+pw,pw,pw);
     } else {
-      // simple pebble cluster
-      ctx.fillRect(d.x,    d.y,    pw*2, pw);
-      ctx.fillRect(d.x+pw, d.y-pw, pw,   pw);
+      ctx.fillRect(d.x,d.y,pw*2,pw); ctx.fillRect(d.x+pw,d.y-pw,pw,pw);
     }
   });
 }
 
 function drawFloor() {
-  const sg=ctx.createLinearGradient(0,FLOOR_Y,0,BASE_H);
+  const sg=ctx.createLinearGradient(0,FLOOR_Y,0,DH);
   sg.addColorStop(0,'#2a1a08'); sg.addColorStop(1,'#1a0f04');
-  ctx.fillStyle=sg; ctx.fillRect(0,FLOOR_Y,BASE_W,28);
-  // wavy top edge
+  ctx.fillStyle=sg; ctx.fillRect(0,FLOOR_Y,DW,28);
   ctx.fillStyle='#322010';
   ctx.beginPath(); ctx.moveTo(0,FLOOR_Y);
-  for(let x=0;x<=BASE_W;x+=6)
-    ctx.lineTo(x, FLOOR_Y+Math.sin((x+frame*0.5)*0.15)*3);
-  ctx.lineTo(BASE_W,BASE_H); ctx.lineTo(0,BASE_H); ctx.fill();
+  for(let x=0;x<=DW;x+=6)
+    ctx.lineTo(x,FLOOR_Y+Math.sin((x+frame*0.5)*0.15)*3);
+  ctx.lineTo(DW,DH); ctx.lineTo(0,DH); ctx.fill();
 }
 
 function drawBubbles() {
   ctx.save();
   bubbles.forEach(b=>{
     b.wobble+=b.wobbleSpeed; b.y-=b.speed; b.x+=Math.sin(b.wobble)*0.4;
-    if(b.y<-10){Object.assign(b,makeBubble(false));b.y=BASE_H+5;b.x=Math.random()*BASE_W;}
+    if(b.y<-10){Object.assign(b,makeBubble(false));b.y=DH+5;b.x=Math.random()*DW;}
     ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2);
     ctx.strokeStyle=`rgba(150,220,255,${b.alpha})`; ctx.lineWidth=0.8; ctx.stroke();
     ctx.fillStyle=`rgba(180,240,255,${b.alpha*0.3})`; ctx.fill();
@@ -227,7 +246,7 @@ function drawBubbles() {
 function drawFloaties() {
   floaties.forEach(f=>{
     f.x+=f.speed; f.sway+=0.03;
-    if(f.x>BASE_W+40) Object.assign(f,makeFloaty(false));
+    if(f.x>DW+40) Object.assign(f,makeFloaty(false));
     ctx.save(); ctx.translate(f.x,f.y+Math.sin(f.sway)*3);
     ctx.fillStyle='rgba(100,200,150,0.18)';
     if(f.type===0){ctx.beginPath();ctx.ellipse(0,0,f.size,f.size*2,0.4,0,Math.PI*2);ctx.fill();}
@@ -237,7 +256,6 @@ function drawFloaties() {
   });
 }
 
-// ── Obstacle coral ─────────────────────────────────────────────────────
 function drawCoral(x, h, flipped) {
   const pw=4;
   const C={base:'#7a1a1a',mid:'#cc3322',bright:'#ff6644',tip:'#ffaa88',dark:'#551111',glow:'#ff8866'};
@@ -257,12 +275,11 @@ function drawCoral(x, h, flipped) {
   const br=Math.floor(h/pw);
   bd.forEach(b=>{
     for(let r=0;r<Math.floor(b.ex/pw);r++){ctx.fillStyle=b.w===3?C.bright:C.mid;ctx.fillRect(b.col*pw,(br+r)*pw,b.w*pw,pw);}
-    const tr2=Math.floor(b.ex/pw);
-    const tc=[C.tip,C.glow,C.bright];
-    for(let tr=0;tr<3;tr++) for(let tc2=-1;tc2<=b.w;tc2++) if(Math.random()>0.3){ctx.fillStyle=tc[tr%3];ctx.fillRect((b.col+tc2)*pw,(br+tr2+tr)*pw,pw,pw);}
+    const tr2=Math.floor(b.ex/pw); const tc=[C.tip,C.glow,C.bright];
+    for(let tr=0;tr<3;tr++) for(let tc2=-1;tc2<=b.w;tc2++)
+      if(Math.random()>0.3){ctx.fillStyle=tc[tr%3];ctx.fillRect((b.col+tc2)*pw,(br+tr2+tr)*pw,pw,pw);}
   });
   ctx.restore();
-  // soft glow
   ctx.save();
   const gy=flipped?h+8:FLOOR_Y-h-8;
   const gg=ctx.createRadialGradient(x+PIPE_W/2,gy,0,x+PIPE_W/2,gy,PIPE_W*0.8);
@@ -273,96 +290,96 @@ function drawCoral(x, h, flipped) {
 
 function drawPipes() {
   pipes.forEach(p=>{
-    drawCoral(p.x, FLOOR_Y-(p.topH+GAP), false);
-    drawCoral(p.x, p.topH, true);
+    drawCoral(p.x,FLOOR_Y-(p.topH+GAP),false);
+    drawCoral(p.x,p.topH,true);
   });
 }
 
-// ── Octopus ────────────────────────────────────────────────────────────
 function drawOctopus() {
   const S=OCTO_S, W=16*S;
-  const ox=OCTO_X-W/2;
-  // pivot the squash/stretch around the body centre (BODY_CENTER_ROW)
-  const scaleY = onFloor ? 0.85 : 1+Math.min(Math.max(octoVY*0.025,-0.18),0.12);
-  const scaleX = onFloor ? 1.15 : 1/scaleY;
-
+  const scaleY=onFloor?0.85:1+Math.min(Math.max(octoVY*0.025,-0.18),0.12);
+  const scaleX=onFloor?1.15:1/scaleY;
   ctx.save();
-  ctx.translate(ox+W/2, octoY);   // pivot at physics centre
-  ctx.scale(scaleX, scaleY);
-
+  ctx.translate(OCTO_X,octoY);
+  ctx.scale(scaleX,scaleY);
   OCTOPUS_PIXELS.forEach((row,ry)=>{
     row.forEach((cell,cx)=>{
       if(cell!==OC.NONE){
         ctx.fillStyle=OCTOPUS_COLORS[cell];
-        // offset so BODY_CENTER_ROW sits at y=0 (= octoY in world space)
-        ctx.fillRect(cx*S-W/2, ry*S-BODY_CENTER_ROW*S, S, S);
+        ctx.fillRect(cx*S-W/2,ry*S-BODY_CENTER_ROW*S,S,S);
       }
     });
+  });
+  const bodyBottomY=(BODY_ROWS-BODY_CENTER_ROW)*S;
+  TENT_COLS.forEach((col,i)=>{
+    const phase=frame*0.055+i*0.65;
+    const baseX=col*S-W/2;
+    for(let row=0;row<TENT_LEN;row++){
+      const wiggle=row===0?0:Math.round(Math.sin(phase+row*0.4))*S;
+      const color=row===TENT_LEN-1?TENT_TIP:row===1?TENT_MID:TENT_BODY;
+      ctx.fillStyle=color;
+      ctx.fillRect(baseX+wiggle,bodyBottomY+row*S,S,S);
+    }
   });
   ctx.restore();
 }
 
-// ── Particles ──────────────────────────────────────────────────────────
 function drawParticles() {
   particles=particles.filter(p=>p.life>0);
   particles.forEach(p=>{
-    p.x+=p.vx;p.y+=p.vy;p.life--;p.vy+=0.05;
+    p.x+=p.vx; p.y+=p.vy; p.life--; p.vy+=0.05;
     ctx.fillStyle=`rgba(${p.r},${p.g},${p.b},${p.life/p.maxLife})`;
     ctx.fillRect(p.x,p.y,p.size,p.size);
   });
 }
 function spawnParticles(x,y){
-  for(let i=0;i<12;i++) particles.push({x,y,vx:(Math.random()-0.5)*5,vy:(Math.random()-0.5)*5,r:201,g:102,b:204,size:2+Math.floor(Math.random()*3),life:20+Math.floor(Math.random()*20),maxLife:40});
+  for(let i=0;i<12;i++) particles.push({x,y,vx:(Math.random()-0.5)*5,vy:(Math.random()-0.5)*5,
+    r:201,g:102,b:204,size:2+Math.floor(Math.random()*3),life:20+Math.floor(Math.random()*20),maxLife:40});
 }
 
-// ── HUD & screens ──────────────────────────────────────────────────────
 function drawHUD() {
   ctx.textAlign='center';
-  ctx.fillStyle='rgba(255,255,255,0.95)';
-  ctx.font='14px "Press Start 2P"';
-  ctx.fillText(score,BASE_W/2,36);
+  ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.font='14px "Press Start 2P"';
+  ctx.fillText(score,DW/2,36);
   ctx.font='7px "Press Start 2P"';
   ctx.fillStyle=hiscore>0?'rgba(255,220,80,0.85)':'rgba(180,240,255,0.35)';
-  ctx.fillText(`BEST: ${hiscore}`,BASE_W/2,54);
+  ctx.fillText(`BEST: ${hiscore}`,DW/2,54);
 }
-
 function drawIdleScreen() {
-  ctx.fillStyle='rgba(2,14,36,0.52)'; ctx.fillRect(0,0,BASE_W,BASE_H);
+  ctx.fillStyle='rgba(2,14,36,0.52)'; ctx.fillRect(0,0,DW,DH);
   ctx.textAlign='center';
   ctx.fillStyle='#c966cc'; ctx.font='18px "Press Start 2P"';
-  ctx.fillText('OCTO DASH',BASE_W/2,BASE_H/2-70);
+  ctx.fillText('OCTO DASH',DW/2,DH/2-70);
   ctx.fillStyle='rgba(100,220,255,0.9)'; ctx.font='7px "Press Start 2P"';
-  ctx.fillText('dodge the coral reefs!',BASE_W/2,BASE_H/2-46);
+  ctx.fillText('dodge the coral reefs!',DW/2,DH/2-46);
   if(hiscore>0){
     ctx.fillStyle='rgba(255,220,80,0.9)'; ctx.font='7px "Press Start 2P"';
-    ctx.fillText(`ALL-TIME BEST: ${hiscore}`,BASE_W/2,BASE_H/2-18);
+    ctx.fillText(`ALL-TIME BEST: ${hiscore}`,DW/2,DH/2-18);
   }
   const pulse=0.5+0.5*Math.sin(frame*0.07);
   ctx.fillStyle=`rgba(255,255,255,${pulse})`; ctx.font='9px "Press Start 2P"';
-  ctx.fillText('TAP / SPACE to swim!',BASE_W/2,BASE_H/2+30);
+  ctx.fillText('TAP TO SWIM!',DW/2,DH/2+30);
 }
-
 function drawDeadScreen() {
-  ctx.fillStyle='rgba(2,14,36,0.72)'; ctx.fillRect(0,0,BASE_W,BASE_H);
+  ctx.fillStyle='rgba(2,14,36,0.72)'; ctx.fillRect(0,0,DW,DH);
   ctx.textAlign='center';
   ctx.fillStyle='#ff4444'; ctx.font='16px "Press Start 2P"';
-  ctx.fillText('TANGLED UP!',BASE_W/2,BASE_H/2-65);
+  ctx.fillText('TANGLED UP!',DW/2,DH/2-65);
   ctx.fillStyle='#ffffff'; ctx.font='9px "Press Start 2P"';
-  ctx.fillText(`SCORE: ${score}`,BASE_W/2,BASE_H/2-30);
+  ctx.fillText(`SCORE: ${score}`,DW/2,DH/2-30);
   if(score>=hiscore&&score>0){
     const pulse=0.6+0.4*Math.sin(frame*0.1);
     ctx.fillStyle=`rgba(255,220,50,${pulse})`; ctx.font='8px "Press Start 2P"';
-    ctx.fillText('✦ NEW BEST! ✦',BASE_W/2,BASE_H/2-4);
+    ctx.fillText('✦ NEW BEST! ✦',DW/2,DH/2-4);
   } else if(hiscore>0){
     ctx.fillStyle='rgba(255,220,80,0.8)'; ctx.font='7px "Press Start 2P"';
-    ctx.fillText(`BEST: ${hiscore}`,BASE_W/2,BASE_H/2-4);
+    ctx.fillText(`BEST: ${hiscore}`,DW/2,DH/2-4);
   }
   const pulse2=0.5+0.5*Math.sin(frame*0.07);
   ctx.fillStyle=`rgba(255,255,255,${pulse2})`; ctx.font='8px "Press Start 2P"';
-  ctx.fillText('TAP to try again!',BASE_W/2,BASE_H/2+36);
+  ctx.fillText('TAP TO TRY AGAIN!',DW/2,DH/2+36);
 }
 
-// ── Collision ──────────────────────────────────────────────────────────
 function checkCollision() {
   for(const p of pipes){
     if(OCTO_X+OCTO_R>p.x+4&&OCTO_X-OCTO_R<p.x+PIPE_W-4)
@@ -371,11 +388,14 @@ function checkCollision() {
   return octoY-OCTO_R<0;
 }
 
-// ── Main loop ──────────────────────────────────────────────────────────
 let pipeTimer=0;
 function gameLoop(){
   frame++;
-  ctx.clearRect(0,0,BASE_W,BASE_H);
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // Scale everything to fill screen exactly
+  ctx.save();
+  ctx.scale(SX, SY);
 
   drawWaterGradient();
   drawReef();
@@ -400,7 +420,7 @@ function gameLoop(){
       state='dead';
     }
   }
-  if(state==='idle'){octoY=BASE_H/2+Math.sin(frame*0.04)*14;pipeTimer=0;}
+  if(state==='idle'){octoY=DH/2+Math.sin(frame*0.04)*14;pipeTimer=0;}
 
   drawPipes();
   drawParticles();
@@ -409,6 +429,7 @@ function gameLoop(){
   if(state==='idle') drawIdleScreen();
   if(state==='dead') drawDeadScreen();
 
+  ctx.restore();
   requestAnimationFrame(gameLoop);
 }
 
@@ -417,9 +438,22 @@ function flap(){
   if(state==='dead'){initGame();state='playing';pipeTimer=40;return;}
   octoVY=FLAP; onFloor=false;
 }
-document.addEventListener('keydown',e=>{if(e.code==='Space'||e.code==='ArrowUp'){e.preventDefault();flap();}});
-canvas.addEventListener('click',flap);
-canvas.addEventListener('touchstart',e=>{e.preventDefault();flap();},{passive:false});
+
+// Keyboard
+document.addEventListener('keydown',e=>{
+  if(e.code==='Space'||e.code==='ArrowUp'){e.preventDefault();flap();}
+});
+
+// Touch / click — prevent all default browser gestures
+canvas.addEventListener('pointerdown', e=>{
+  e.preventDefault();
+  flap();
+}, {passive:false});
+
+document.addEventListener('touchstart',  e=>e.preventDefault(), {passive:false});
+document.addEventListener('touchmove',   e=>e.preventDefault(), {passive:false});
+document.addEventListener('touchend',    e=>e.preventDefault(), {passive:false});
+document.addEventListener('gesturestart',e=>e.preventDefault(), {passive:false});
 
 initGame();
 gameLoop();
